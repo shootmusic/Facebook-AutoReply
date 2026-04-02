@@ -1,0 +1,141 @@
+name: Facebook Auto Reply AI
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # Setiap 30 menit
+  workflow_dispatch:
+
+jobs:
+  auto-reply:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install jq
+      run: sudo apt-get install -y jq
+
+    - name: Restore posted videos history
+      uses: actions/cache@v4
+      with:
+        path: posted_videos.txt
+        key: posted-videos-history
+        restore-keys: |
+          posted-videos-
+
+    - name: Restore replied comments history
+      uses: actions/cache@v4
+      with:
+        path: replied_comments.txt
+        key: replied-comments-history
+        restore-keys: |
+          replied-comments-
+
+    - name: Download posted videos from uploader repo
+      run: |
+        # Ambil dari repo Facebook-Auto-Upload-
+        curl -s "https://raw.githubusercontent.com/shootmusic/Facebook-Auto-Upload-/main/posted_videos.txt" \
+          -o posted_videos.txt 2>/dev/null || echo "No file from Facebook-Auto-Upload-"
+        
+        # Kalo kosong, coba dari repo lain
+        if [ ! -s posted_videos.txt ]; then
+          curl -s "https://raw.githubusercontent.com/shootmusic/YouTube-Auto-Upload/main/posted_videos.txt" \
+            -o posted_videos.txt 2>/dev/null || echo "No file from YouTube-Auto-Upload"
+        fi
+        
+        if [ ! -s posted_videos.txt ]; then
+          echo "⚠️ No posted_videos.txt found, creating empty"
+          touch posted_videos.txt
+        else
+          echo "✅ posted_videos.txt loaded"
+          cat posted_videos.txt
+        fi
+
+    - name: Auto Reply to comments
+      env:
+        FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: |
+        if [ ! -f "posted_videos.txt" ] || [ ! -s "posted_videos.txt" ]; then
+          echo "⚠️ No posted videos history found"
+          exit 0
+        fi
+        
+        touch replied_comments.txt
+        CURRENT_DATE=$(date +%s)
+        
+        while IFS='|' read -r VIDEO_ID UPLOAD_DATE; do
+          if [ -z "$VIDEO_ID" ]; then
+            continue
+          fi
+          
+          # Hitung umur video
+          if [ -n "$UPLOAD_DATE" ]; then
+            UPLOAD_TIMESTAMP=$(date -d "$UPLOAD_DATE" +%s 2>/dev/null || echo 0)
+            AGE_DAYS=$(( (CURRENT_DATE - UPLOAD_TIMESTAMP) / 86400 ))
+            if [ $AGE_DAYS -ge 30 ]; then
+              echo "⏭️ Skip video $VIDEO_ID (uploaded $AGE_DAYS days ago)"
+              continue
+            fi
+          fi
+          
+          echo "📝 Checking comments for video $VIDEO_ID"
+          
+          # Ambil komen terbaru
+          RESPONSE=$(curl -s -X GET "https://graph.facebook.com/v18.0/${VIDEO_ID}/comments?access_token=${FB_PAGE_TOKEN}&order=reverse_chronological&limit=10")
+          
+          # Cek error
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            echo "⚠️ Error: $(echo "$RESPONSE" | jq -r '.error.message')"
+            continue
+          fi
+          
+          # Proses setiap komen
+          echo "$RESPONSE" | jq -c '.data[]' 2>/dev/null | while read comment; do
+            COMMENT_ID=$(echo "$comment" | jq -r '.id')
+            COMMENT_TEXT=$(echo "$comment" | jq -r '.message')
+            COMMENT_FROM=$(echo "$comment" | jq -r '.from.name')
+            
+            # Skip kalo komen dari page sendiri
+            if [ "$COMMENT_FROM" = "koko crunch" ]; then
+              continue
+            fi
+            
+            # Skip kalo udah pernah dibalas
+            if grep -q "^$COMMENT_ID$" replied_comments.txt; then
+              continue
+            fi
+            
+            echo "💬 New comment from $COMMENT_FROM: $COMMENT_TEXT"
+            
+            # Generate reply dengan Gemini
+            REPLY=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-pro:generateContent?key=${GEMINI_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"contents\": [{
+                  \"parts\": [{
+                    \"text\": \"Balas komen Facebook ini dengan ramah, singkat (max 50 kata), engaging, dan gunakan emoji. Komen: ${COMMENT_TEXT}\"
+                  }]
+                }]
+              }" | jq -r '.candidates[0].content.parts[0].text // ""')
+            
+            if [ -n "$REPLY" ] && [ "$REPLY" != "null" ] && [ "$REPLY" != "" ]; then
+              echo "🤖 Replying: $REPLY"
+              curl -s -X POST "https://graph.facebook.com/v18.0/${COMMENT_ID}/comments" \
+                -d "message=${REPLY}" \
+                -d "access_token=${FB_PAGE_TOKEN}" > /dev/null
+              echo "$COMMENT_ID" >> replied_comments.txt
+              echo "✅ Replied"
+              sleep 3
+            else
+              echo "⚠️ Failed to generate reply"
+            fi
+          done
+        done < posted_videos.txt
+        
+    - name: Save replied comments history
+      uses: actions/cache/save@v4
+      with:
+        path: replied_comments.txt
+        key: replied-comments-history
