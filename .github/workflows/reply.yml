@@ -16,13 +16,16 @@ jobs:
     - name: Install jq
       run: sudo apt-get install -y jq
 
-    - name: Restore posted videos history
-      uses: actions/cache@v4
-      with:
-        path: posted_videos.txt
-        key: posted-videos-history
-        restore-keys: |
-          posted-videos-
+    - name: Download posted videos from uploader repo
+      run: |
+        curl -s "https://raw.githubusercontent.com/shootmusic/Facebook-Auto-Upload-/main/posted_videos.txt" -o posted_videos.txt
+        if [ ! -s posted_videos.txt ]; then
+          echo "⚠️ No posted_videos.txt found"
+          touch posted_videos.txt
+        else
+          echo "✅ posted_videos.txt loaded"
+          cat posted_videos.txt
+        fi
 
     - name: Restore replied comments history
       uses: actions/cache@v4
@@ -31,26 +34,6 @@ jobs:
         key: replied-comments-history
         restore-keys: |
           replied-comments-
-
-    - name: Download posted videos from uploader repo
-      run: |
-        # Ambil dari repo Facebook-Auto-Upload-
-        curl -s "https://raw.githubusercontent.com/shootmusic/Facebook-Auto-Upload-/main/posted_videos.txt" \
-          -o posted_videos.txt 2>/dev/null || echo "No file from Facebook-Auto-Upload-"
-        
-        # Kalo kosong, coba dari repo lain
-        if [ ! -s posted_videos.txt ]; then
-          curl -s "https://raw.githubusercontent.com/shootmusic/YouTube-Auto-Upload/main/posted_videos.txt" \
-            -o posted_videos.txt 2>/dev/null || echo "No file from YouTube-Auto-Upload"
-        fi
-        
-        if [ ! -s posted_videos.txt ]; then
-          echo "⚠️ No posted_videos.txt found, creating empty"
-          touch posted_videos.txt
-        else
-          echo "✅ posted_videos.txt loaded"
-          cat posted_videos.txt
-        fi
 
     - name: Auto Reply to comments
       env:
